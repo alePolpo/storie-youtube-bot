@@ -1,0 +1,36 @@
+name: bot
+
+# Gira su GitHub Actions: ogni run tiene vivo bot.py per ~5h40m. Il cron ogni
+# 15 min tiene sempre un run in coda, che parte appena finisce quello attivo
+# (concurrency), quindi il buco è di 1-2 minuti: i messaggi arrivati nel
+# frattempo li prende il run dopo.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install pillow
+      - run: timeout 340m python3 bot.py || true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AFFILIATE_TAG: ${{ secrets.AFFILIATE_TAG }}
+      # senza commit GitHub spegne il cron dopo 60 giorni: riattivarlo azzera il conto
+      - if: always()
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/bot.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}

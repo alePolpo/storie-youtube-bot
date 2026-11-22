@@ -1,0 +1,7 @@
+.env
+__pycache__/
+storia.png
+copertina.png
+bot.log
+worker/
+.wrangler/
