@@ -17,6 +17,7 @@ Uso:
 """
 import html
 import io
+import math
 import json
 import os
 import re
@@ -91,6 +92,134 @@ def affilia(url):
         return f"https://{u.hostname}/dp/{m[1].upper()}?tag={AFFILIATE_TAG}"
     q = [(k, v) for k, v in urllib.parse.parse_qsl(u.query) if k != "tag"] + [("tag", AFFILIATE_TAG)]
     return urllib.parse.urlunparse(u._replace(query=urllib.parse.urlencode(q)))
+
+
+def _block(h, name):
+    """HTML di un widget della pagina prodotto, senza style/script."""
+    i = h.find(f'id="{name}"')
+    if i < 0:
+        return ""
+    j = h.find('feature_div" class="celwidget"', i + 50)
+    b = re.sub(r"<(style|script).*?</\1>", "", h[i:j if j > 0 else i + 15000], flags=re.S)
+    return b[b.find(">") + 1:]  # via il resto del tag di apertura (id=..., class=...)
+
+
+def _text(html_):
+    return [t.strip() for t in re.split(r"<[^>]+>", html_) if t.strip()]
+
+
+def amazon_info(url):
+    """Titolo, foto, prezzo e badge dalla pagina prodotto; ogni pezzo c'è solo se la pagina lo mostra."""
+    u = urllib.parse.urlparse(url)
+    m = ASIN_RE.search(u.path)
+    if not m:
+        return None
+    page = http_get(f"https://{u.hostname}/dp/{m[1].upper()}", timeout=25).decode("utf-8", "replace")
+    if re.search(r"captcha|Digita i caratteri", page, re.I) and 'id="productTitle"' not in page:
+        raise RuntimeError("Amazon ha chiesto un captcha")
+    t = re.search(r'id="productTitle"[^>]*>\s*([^<]+)', page)
+    img = re.findall(r'"hiRes":"([^"]+)"', page) or re.findall(r'"large":"([^"]+)"', page)
+    if not t or not img:
+        raise RuntimeError("Pagina prodotto non leggibile")
+    info = {"title": re.sub(r"[\u200b-\u200f\ufeff]", "", html.unescape(re.sub(r"\s+", " ", t[1]))).strip(), "image": http_get(img[0]),
+            "price": None, "old": None, "pct": None, "deal": None, "deal_bg": "#CC0C39",
+            "rating": None, "count": None, "choice": False}
+    core = _block(page, "corePriceDisplay_desktop_feature_div")
+    if p := re.search(r'priceToPay.*?a-price-whole">([\d.]+)<span class="a-price-decimal">,</span></span>'
+                      r'<span class="a-price-fraction">(\d+)', core, re.S):
+        info["price"] = (p[1], p[2])
+        if o := re.search(r'apex-basisprice-value.*?a-offscreen">([\d.,]+)', core, re.S):
+            info["old"] = o[1] + " €"
+        if c := re.search(r'savingsPercentage[^>]*>\s*-?(\d+)%', core):
+            info["pct"] = int(c[1])
+    deal = _block(page, "dealBadge_feature_div")
+    if texts := _text(deal):
+        label = texts[0].split("NO_OF")[0].strip()
+        if label and "{" not in label and "<" not in label:
+            info["deal"] = label
+            if b := re.search(r"--deal-badge-bg:\s*(#[0-9A-Fa-f]{6})", deal):
+                info["deal_bg"] = b[1]
+    if r := re.search(r'id="acrPopover"[^>]*title="([\d,]+) su 5', page):
+        info["rating"] = float(r[1].replace(",", "."))
+        if n := re.search(r'id="acrCustomerReviewText"[^>]*>\s*\(?([\d.]+)', page):
+            info["count"] = n[1]
+    info["choice"] = any(re.fullmatch(r"Scelta\s+Amazon", t) for t in _text(_block(page, "acBadge_feature_div")))
+    return info
+
+
+def _stars(img, x, y, size, rating):
+    S = 4
+    mask = Image.new("L", (size * 5 * S, size * S), 0)
+    md = ImageDraw.Draw(mask)
+    for i in range(5):
+        cx, cy, r = (i + .5) * size * S, size * S / 2, size * S / 2
+        md.polygon([(cx + (r if k % 2 == 0 else r * .42) * math.cos(-math.pi / 2 + k * math.pi / 5),
+                     cy + (r if k % 2 == 0 else r * .42) * math.sin(-math.pi / 2 + k * math.pi / 5))
+                    for k in range(10)], fill=255)
+    mask = mask.resize((size * 5, size), Image.LANCZOS)
+    fill = Image.new("L", mask.size, 0)
+    ImageDraw.Draw(fill).rectangle([0, 0, int(size * rating), size], fill=255)
+    img.paste(Image.composite(Image.new("RGB", mask.size, (255, 164, 28)),
+                              Image.new("RGB", mask.size, (221, 221, 221)), fill), (x, y), mask)
+
+
+def render_amazon(info):
+    """Pagina prodotto semplificata come nell'app Amazon, 1080x1920: ogni riga solo se il dato c'è."""
+    pad = 48
+    img = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(img)
+    photo = ImageOps.contain(Image.open(io.BytesIO(info["image"])).convert("RGB"), (W - 2 * pad, 760), Image.LANCZOS)
+    f_t, f_r, f_b = font("Inter-Regular.ttf", 38), font("Inter-Regular.ttf", 36), font("Inter-Medium.ttf", 34)
+    lines = wrap(info["title"], f_t, W - 2 * pad, 4)
+    # altezza del blocco, per centrarlo in verticale
+    h = len(lines) * 52 + 14 + (62 if info["rating"] else 0) + (90 if info["choice"] else 0) + photo.height + 30
+    if info["deal"]:
+        h += 84
+    if info["price"]:
+        h += 118 + (60 if info["old"] else 0)
+    y = max(150, (H - h) // 2 - 20)
+    for l in lines:
+        d.text((pad, y), l, font=f_t, fill=(86, 89, 89)); y += 52
+    y += 14
+    if info["rating"]:
+        txt = f"{info['rating']:.1f}".replace(".", ",")
+        d.text((pad, y), txt, font=f_r, fill=(15, 17, 17))
+        sx = pad + int(f_r.getlength(txt)) + 10
+        _stars(img, sx, y + 4, 36, info["rating"])
+        if info["count"]:
+            d.text((sx + 5 * 36 + 14, y), f"({info['count']})", font=f_r, fill=(0, 113, 133))
+        y += 62
+    if info["choice"]:
+        bw = int(f_b.getlength("Scelta Amazon")) + 40
+        d.rounded_rectangle([pad, y, pad + bw, y + 58], 8, fill=(35, 47, 62))
+        d.text((pad + 20, y + 29), "Scelta Amazon", font=f_b, fill="white", anchor="lm")
+        y += 90
+    img.paste(photo, ((W - photo.width) // 2, y)); y += photo.height + 30
+    if info["deal"]:
+        f_d = font("InterDisplay-SemiBold.ttf", 36)
+        dw = int(f_d.getlength(info["deal"])) + 44
+        d.rounded_rectangle([pad, y, pad + dw, y + 62], 6, fill=info["deal_bg"])
+        d.text((pad + 22, y + 31), info["deal"], font=f_d, fill="white", anchor="lm"); y += 84
+    if info["price"]:
+        euros, cents = info["price"]
+        x = pad
+        if info["pct"]:
+            f_pc = font("Inter-Regular.ttf", 76)
+            d.text((x, y + 70), f"-{info['pct']}%", font=f_pc, fill=(204, 12, 57), anchor="ls")
+            x += int(f_pc.getlength(f"-{info['pct']}%")) + 24
+        f_big, f_sup = font("Inter-Regular.ttf", 112), font("Inter-Regular.ttf", 48)
+        d.text((x, y + 110), euros, font=f_big, fill=(15, 17, 17), anchor="ls")
+        x += int(f_big.getlength(euros)) + 4
+        d.text((x, y + 40), f"{cents} €", font=f_sup, fill=(15, 17, 17), anchor="ls")
+        if info["old"]:
+            f_o, lab = font("Inter-Regular.ttf", 36), "Prezzo consigliato: "
+            d.text((pad, y + 168), lab, font=f_o, fill=(86, 89, 89), anchor="ls")
+            ox = pad + f_o.getlength(lab)
+            d.text((ox, y + 168), info["old"], font=f_o, fill=(86, 89, 89), anchor="ls")
+            d.line([(ox, y + 156), (ox + f_o.getlength(info["old"]), y + 156)], fill=(86, 89, 89), width=3)
+    out = io.BytesIO()
+    img.save(out, "PNG", optimize=True)
+    return out.getvalue()
 
 
 # ------------------------------------------------------------------ YouTube
@@ -342,7 +471,17 @@ def handle_update(u):
     if not vid:
         links = AMZ_RE.findall(text)
         if links:  # Amazon: link affiliato da copiare, uno per riga
-            send_text("\n".join(f"<code>{html.escape(affilia(l))}</code>" for l in links))
+            for l in links:
+                link = affilia(l)
+                try:
+                    info = amazon_info(link)
+                    if info:
+                        tg("sendDocument", {"reply_to_message_id": m["message_id"]},
+                           [("document", "amazon.png", render_amazon(info), "image/png")])
+                except Exception as e:  # noqa: BLE001
+                    log("pagina Amazon non letta:", e)
+                    send_text("Non riesco a leggere la pagina, ecco solo il link.")
+                send_text(f"<code>{html.escape(link)}</code>")
         elif text.startswith("/start"):
             send_text("Mandami un link YouTube e ti preparo la storia, o un link Amazon e ti do quello affiliato.")
         else:
@@ -392,7 +531,13 @@ def cmd_chat_id():
 
 def cmd_test(text):
     if not video_id(text) and AMZ_RE.search(text):
-        return print(affilia(AMZ_RE.search(text)[0]))
+        link = affilia(AMZ_RE.search(text)[0])
+        print(link)
+        info = amazon_info(link)
+        if info:
+            (BASE / "amazon.png").write_bytes(render_amazon(info))
+            print({k: v for k, v in info.items() if k != "image"})
+        return
     vid = video_id(text)
     assert vid, "link YouTube non riconosciuto"
     info = fetch_info(vid)
