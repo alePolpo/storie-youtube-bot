@@ -1,9 +1,9 @@
 name: bot
 
-# Gira su GitHub Actions: ogni run tiene vivo bot.py per ~5h40m. Il cron ogni
-# 15 min tiene sempre un run in coda, che parte appena finisce quello attivo
-# (concurrency), quindi il buco è di 1-2 minuti: i messaggi arrivati nel
-# frattempo li prende il run dopo.
+# Gira su GitHub Actions: ogni run tiene vivo bot.py per ~5h40m e, appena parte,
+# mette in coda il successivo (concurrency: parte quando finisce quello attivo).
+# Il cron da solo non basta, GitHub lo salta per ore: qui è solo la riserva che
+# riavvia la catena se si spezza. I messaggi arrivati nel buco li prende il run dopo.
 on:
   workflow_dispatch:
   schedule:
@@ -22,9 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
+      - name: mette in coda il run successivo
+        run: for i in 1 2 3; do gh workflow run bot.yml -R "${{ github.repository }}" --ref main && exit 0; sleep 10; done
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/checkout@v4
-      - run: pip install pillow
-      - run: timeout 340m python3 bot.py || true
+      - run: pip install pillow || (sleep 30; pip install pillow)
+      - run: timeout 340m python3 bot.py || [ $? -eq 124 ] || sleep 60  # 124 = fine turno; se invece crasha, pausa contro il giro a vuoto
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
