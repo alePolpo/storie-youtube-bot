@@ -79,14 +79,29 @@ AMZ_RE = re.compile(r"https?://(?:[\w-]+\.)?(?:amazon\.[a-z.]+|amzn\.(?:to|eu|co
 ASIN_RE = re.compile(r"/(?:dp|gp/product|gp/aw/d|d)/([A-Z0-9]{10})", re.I)
 
 
-def affilia(url):
+# Da GitHub Actions Amazon non dà le pagine e link.amazon porta ad amazon.com:
+# se c'è AMZ_PROXY si passa dal worker amazon-affiliato, che gira a Milano.
+AMZ_PROXY = os.environ.get("AMZ_PROXY", "")
+AMZ_PROXY_KEY = os.environ.get("AMZ_PROXY_KEY", "")
+
+
+def amz_get(url, timeout=25):
+    """(url finale dopo i redirect, contenuto)."""
+    if AMZ_PROXY:
+        req = urllib.request.Request(f"{AMZ_PROXY}/amz?u={urllib.parse.quote(url, safe='')}",
+                                     headers={"X-Key": AMZ_PROXY_KEY, "User-Agent": UA})
+    else:
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "it-IT,it;q=0.9"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.headers.get("X-Url") or r.geturl(), r.read()
+
+
+def affilia(url, final=None):
     if not AFFILIATE_TAG:
         raise RuntimeError("Manca AFFILIATE_TAG")
-    url = url.rstrip(".,;:!?")
+    url = final or url.rstrip(".,;:!?")
     if not re.search(r"(^|\.)amazon\.", urllib.parse.urlparse(url).hostname or "", re.I):  # link corto: segui il redirect
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            url = r.geturl()
+        url = amz_get(url)[0]
     u = urllib.parse.urlparse(url)
     if m := ASIN_RE.search(u.path):
         return f"https://{u.hostname}/dp/{m[1].upper()}?tag={AFFILIATE_TAG}"
@@ -108,20 +123,22 @@ def _text(html_):
     return [t.strip() for t in re.split(r"<[^>]+>", html_) if t.strip()]
 
 
-def amazon_info(url):
+def amazon_info(url, page=None):
     """Titolo, foto, prezzo e badge dalla pagina prodotto; ogni pezzo c'è solo se la pagina lo mostra."""
     u = urllib.parse.urlparse(url)
     m = ASIN_RE.search(u.path)
     if not m:
         return None
-    page = http_get(f"https://{u.hostname}/dp/{m[1].upper()}", timeout=25).decode("utf-8", "replace")
+    if page is None:
+        page = amz_get(f"https://{u.hostname}/dp/{m[1].upper()}")[1]
+    page = page.decode("utf-8", "replace")
     if re.search(r"captcha|Digita i caratteri", page, re.I) and 'id="productTitle"' not in page:
         raise RuntimeError("Amazon ha chiesto un captcha")
     t = re.search(r'id="productTitle"[^>]*>\s*([^<]+)', page)
     img = re.findall(r'"hiRes":"([^"]+)"', page) or re.findall(r'"large":"([^"]+)"', page)
     if not t or not img:
         raise RuntimeError("Pagina prodotto non leggibile")
-    info = {"title": re.sub(r"[\u200b-\u200f\ufeff]", "", html.unescape(re.sub(r"\s+", " ", t[1]))).strip(), "image": http_get(img[0]),
+    info = {"title": re.sub(r"[\u200b-\u200f\ufeff]", "", html.unescape(re.sub(r"\s+", " ", t[1]))).strip(), "image": amz_get(img[0])[1],
             "price": None, "old": None, "pct": None, "deal": None, "deal_bg": "#CC0C39",
             "rating": None, "count": None, "choice": False}
     core = _block(page, "corePriceDisplay_desktop_feature_div")
@@ -472,9 +489,19 @@ def handle_update(u):
         links = AMZ_RE.findall(text)
         if links:  # Amazon: link affiliato da copiare, uno per riga
             for l in links:
-                link = affilia(l)
+                try:  # una sola richiesta: segue il link corto e porta già la pagina
+                    final, page = amz_get(l.rstrip(".,;:!?"))
+                except Exception as e:  # noqa: BLE001
+                    log("link non aperto:", l, e)
+                    final, page = None, None
                 try:
-                    info = amazon_info(link)
+                    link = affilia(l, final)
+                except Exception as e:  # noqa: BLE001
+                    log("link non affiliato:", l, e)
+                    send_text(f"⚠️ Non riesco ad aprire questo link, riprova tra poco:\n{html.escape(l)}")
+                    continue
+                try:
+                    info = amazon_info(link, page if final and ASIN_RE.search(urllib.parse.urlparse(final).path) else None)
                     if info:
                         tg("sendDocument", {"reply_to_message_id": m["message_id"]},
                            [("document", "amazon.png", render_amazon(info), "image/png")])

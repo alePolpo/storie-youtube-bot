@@ -14,6 +14,9 @@ Bot Telegram. Gli mandi:
 - `TELEGRAM_BOT_TOKEN`: token da @BotFather
 - `TELEGRAM_CHAT_ID`: l'unica chat a cui risponde (`python3 bot.py --chat-id`)
 - `AFFILIATE_TAG`: tag affiliato Amazon
+- `AMZ_PROXY`, `AMZ_PROXY_KEY` (facoltativi): proxy per le pagine Amazon. Da GitHub Actions
+  Amazon non dà le pagine e i link corti portano ad amazon.com, quindi lì servono.
+  Senza, il bot legge Amazon direttamente (va bene in locale).
 
 Su GitHub Actions gli stessi valori vanno nei secrets: `gh secret set -f .env`.
 
