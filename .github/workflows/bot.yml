@@ -28,6 +28,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/checkout@v4
+        with:
+          ref: main  # un run rimasto in coda prende l'ultimo codice, non quello di quando è stato accodato
       - run: pip install pillow || (sleep 30; pip install pillow)
       - run: timeout 340m python3 bot.py || [ $? -eq 124 ] || sleep 60  # 124 = fine turno; se invece crasha, pausa contro il giro a vuoto
         env:
