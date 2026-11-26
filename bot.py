@@ -181,11 +181,13 @@ def _stars(img, x, y, size, rating):
 
 
 def render_amazon(info):
-    """Pagina prodotto semplificata come nell'app Amazon, 1080x1920: ogni riga solo se il dato c'è."""
+    """Pagina prodotto semplificata come nell'app Amazon, larga 1080 e alta quanto il contenuto: ogni riga solo se il dato c'è."""
     pad = 48
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
-    photo = ImageOps.contain(Image.open(io.BytesIO(info["image"])).convert("RGB"), (W - 2 * pad, 760), Image.LANCZOS)
+    src = Image.open(io.BytesIO(info["image"])).convert("RGB")
+    src = src.crop(_bbox(src) or (0, 0, *src.size))  # via il bianco attorno al prodotto
+    photo = ImageOps.contain(src, (W - 2 * pad, 760), Image.LANCZOS)
     f_t, f_r, f_b = font("Inter-Regular.ttf", 38), font("Inter-Regular.ttf", 36), font("Inter-Medium.ttf", 34)
     lines = wrap(info["title"], f_t, W - 2 * pad, 4)
     # altezza del blocco, per centrarlo in verticale
@@ -234,9 +236,16 @@ def render_amazon(info):
             ox = pad + f_o.getlength(lab)
             d.text((ox, y + 168), info["old"], font=f_o, fill=(86, 89, 89), anchor="ls")
             d.line([(ox, y + 156), (ox + f_o.getlength(info["old"]), y + 156)], fill=(86, 89, 89), width=3)
+    bb = _bbox(img)  # niente fasce bianche sopra e sotto
+    img = img.crop((0, max(0, bb[1] - pad), W, min(H, bb[3] + pad)))
     out = io.BytesIO()
     img.save(out, "PNG", optimize=True)
     return out.getvalue()
+
+
+def _bbox(img):
+    """Riquadro di quello che non è bianco."""
+    return ImageOps.invert(img.convert("L")).point(lambda v: 255 if v > 10 else 0).getbbox()
 
 
 # ------------------------------------------------------------------ YouTube
