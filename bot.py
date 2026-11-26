@@ -248,6 +248,128 @@ def _bbox(img):
     return ImageOps.invert(img.convert("L")).point(lambda v: 255 if v > 10 else 0).getbbox()
 
 
+# ---------------------------------------------------------- /storia Amazon
+GOTHAM = ("Gotham-Black.otf", "Gotham-Bold.otf", "Gotham-Medium.otf")
+BLU, BLU_ACCESO = (18, 44, 137), (27, 80, 220)  # colori del canale
+CAMPI_RE = re.compile(r"^\s*(nome|prezzo|prima|etichetta|nota)\s*:\s*(.+?)\s*$", re.I | re.M)
+
+
+def gotham(name, size):
+    """Gotham dal Mac o dal worker (non sta nel repo pubblico); se manca, Inter."""
+    p = FONTS / name
+    if not p.exists():
+        try:
+            p.write_bytes(_scarica_font(name))
+        except Exception as e:  # noqa: BLE001
+            log("Gotham non disponibile:", e)
+            return font("InterDisplay-Bold.ttf", size)
+    return ImageFont.truetype(str(p), size)
+
+
+def _scarica_font(name):
+    mac = Path.home() / "Library/Fonts" / name
+    if mac.exists():
+        return mac.read_bytes()
+    req = urllib.request.Request(f"{AMZ_PROXY}/font/{name}", headers={"X-Key": AMZ_PROXY_KEY, "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read()
+
+
+def nome_breve(title):
+    """'Apple AirPods Pro 3, Cancellazione attiva…' -> 'Apple AirPods Pro 3'."""
+    t = re.split(r"\s*[,|–—(]\s*|\s+-\s+", title)[0].strip()
+    return t if len(t) <= 60 else t[:60].rsplit(" ", 1)[0] + "…"
+
+
+def euro(txt):
+    """'249,00 €' / '249' / ('189','00') -> '249 €' (centesimi solo se ci sono)."""
+    if isinstance(txt, tuple):
+        txt = f"{txt[0]},{txt[1]}"
+    t = re.sub(r"[€\s]", "", str(txt)).removesuffix(",00")
+    return f"{t} €"
+
+
+def etichetta(info):
+    d = info.get("deal") or ""
+    for ev in ("Black Friday", "Cyber Monday", "Prime Day"):
+        if ev.lower() in d.lower():
+            return ev.upper()
+    return d.upper() or ("OFFERTA" if info.get("pct") else "")
+
+
+def tag(text, f, fg, bg, angle=0.0, padx=28, pady=18):
+    """Scritta su rettangolo pieno, eventualmente un po' storta (come gli adesivi)."""
+    l, t, r_, b = f.getbbox(text)
+    w, h = r_ - l + 2 * padx, b - t + 2 * pady
+    im = Image.new("RGBA", (w, h), bg)
+    ImageDraw.Draw(im).text((padx - l, pady - t), text, font=f, fill=fg)
+    return im.rotate(angle, Image.BICUBIC, expand=True) if angle else im
+
+
+def render_storia(info, campi=None):
+    """Storia 1080x1920 per un'offerta: sfondo sfocato, etichetta in alto, card con foto, nome e prezzi.
+    campi (dal messaggio, facoltativi): nome, prezzo, prima, etichetta, nota."""
+    c = {k.lower(): v for k, v in (campi or {}).items()}
+    nome = c.get("nome") or nome_breve(info["title"])
+    prezzo = euro(c["prezzo"]) if "prezzo" in c else (euro(info["price"]) if info.get("price") else "")
+    prima = euro(c["prima"]) if "prima" in c else (euro(info["old"]) if info.get("old") else "")
+    label = (c.get("etichetta") or etichetta(info)).upper()
+
+    src = Image.open(io.BytesIO(info["image"])).convert("RGB")
+    src = src.crop(_bbox(src) or (0, 0, *src.size))
+    canvas = background(src).convert("RGBA")
+    d = ImageDraw.Draw(canvas)
+
+    y = 250  # sotto la barra del profilo di Instagram
+    if label:
+        t = tag(label, gotham("Gotham-Black.otf", 64), "white", (15, 15, 15), angle=2)
+        canvas.alpha_composite(t, ((W - t.width) // 2, y)); y += t.height + 18
+    f_aff = gotham("Gotham-Medium.otf", 30)
+    a = tag("LINK AFFILIATO", f_aff, (15, 15, 15), "white", padx=18, pady=10)  # leggibile su ogni sfondo
+    canvas.alpha_composite(a, ((W - a.width) // 2, y)); y += a.height + 44
+
+    # card bianca: foto, nome, prezzi
+    pad, cw = 60, CARD_W
+    f_nome, f_prezzo, f_prima = gotham("Gotham-Bold.otf", 54), gotham("Gotham-Black.otf", 120), gotham("Gotham-Medium.otf", 50)
+    righe = wrap(nome.upper(), f_nome, cw - 2 * pad, 2)
+    price_h = 170 if prezzo else 0
+    foto_max = 1920 - 360 - y - (pad + len(righe) * 64 + 30 + price_h + pad)  # 360 liberi per il link di IG
+    photo = ImageOps.contain(src, (cw - 2 * pad, min(640, foto_max)), Image.LANCZOS)
+    ch = pad + photo.height + 40 + len(righe) * 64 + (30 + price_h if prezzo else 0) + pad
+    card = Image.new("RGB", (cw, ch), "white")
+    card.paste(photo, ((cw - photo.width) // 2, pad))
+    cd = ImageDraw.Draw(card)
+    cy = pad + photo.height + 40
+    for riga in righe:
+        cd.text((pad, cy), riga, font=f_nome, fill=(15, 15, 15)); cy += 64
+    if prezzo:
+        cy += 30
+        box = tag(prezzo, f_prezzo, "white", BLU_ACCESO, padx=30, pady=24)
+        card.paste(box, (pad, cy), box)
+        if prima:
+            px = pad + box.width + 34
+            cd.text((px, cy + box.height // 2 - 26), prima, font=f_prima, fill=(110, 110, 110), anchor="lm")
+            pw = f_prima.getlength(prima)
+            cd.line([(px, cy + box.height // 2 - 26), (px + pw, cy + box.height // 2 - 26)], fill=(110, 110, 110), width=5)
+            if info.get("pct") and "prezzo" not in c:
+                cd.text((px, cy + box.height // 2 + 34), f"-{info['pct']}%", font=f_prima, fill=BLU_ACCESO, anchor="lm")
+
+    cx = CARD_X
+    sh = Image.new("L", (W, H), 0)  # ombra morbida come nelle storie YouTube
+    sh.paste(mask_rounded((cw, ch), RADIUS), (cx, y + 14))
+    sh = sh.filter(ImageFilter.GaussianBlur(28)).point(lambda v: v * 40 // 100)
+    canvas.paste((0, 0, 0, 255), (0, 0, W, H), sh)
+    canvas.paste(card, (cx, y), mask_rounded((cw, ch), RADIUS))
+    y += ch + 30
+    if c.get("nota"):
+        n = tag(c["nota"].upper(), gotham("Gotham-Black.otf", 44), "white", (15, 15, 15), angle=-2)
+        canvas.alpha_composite(n, (cx, y))
+
+    out = io.BytesIO()
+    canvas.convert("RGB").save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
 # ------------------------------------------------------------------ YouTube
 ID_RE = re.compile(r'(?:youtu\.be/|youtube\.com/(?:watch\?(?:\S*?&)?v=|shorts/|live/|embed/))'
                    r'([A-Za-z0-9_-]{11})')
@@ -484,6 +606,17 @@ def send_text(text, **extra):
                        "disable_web_page_preview": "true", **extra})
 
 
+def leggi_amazon(l):
+    """(link affiliato, pagina prodotto se già scaricata). Una sola richiesta: segue il link corto e porta la pagina."""
+    try:
+        final, page = amz_get(l.rstrip(".,;:!?"))
+    except Exception as e:  # noqa: BLE001
+        log("link non aperto:", l, e)
+        final, page = None, None
+    link = affilia(l, final)
+    return link, page if final and ASIN_RE.search(urllib.parse.urlparse(final).path) else None
+
+
 def handle_update(u):
     c = (u.get("message") or u.get("my_chat_member") or {}).get("chat", {})
     if c.get("type") in ("group", "supergroup", "channel"):
@@ -494,23 +627,33 @@ def handle_update(u):
         return
     text = m.get("text") or m.get("caption") or ""
     vid = video_id(text)
+    if text.startswith("/storia"):
+        links = AMZ_RE.findall(text)
+        if not links:
+            send_text("Scrivi /storia e il link Amazon. Sotto puoi cambiare i campi, uno per riga:\n"
+                      "<code>nome: AirPods Max\nprezzo: 419\nprima: 579\netichetta: Black Friday\nnota: Fino al 30/11</code>")
+            return
+        tg("sendChatAction", {"action": "upload_document"}, tries=1)
+        link, page = leggi_amazon(links[0])
+        info = amazon_info(link, page)
+        if not info:
+            raise RuntimeError("non è la pagina di un prodotto")
+        tg("sendDocument", {"caption": f"<code>{html.escape(link)}</code>", "parse_mode": "HTML",
+                            "reply_to_message_id": m["message_id"]},
+           [("document", "storia-amazon.png", render_storia(info, dict(CAMPI_RE.findall(text))), "image/png")])
+        return
     if not vid:
         links = AMZ_RE.findall(text)
         if links:  # Amazon: link affiliato da copiare, uno per riga
             for l in links:
-                try:  # una sola richiesta: segue il link corto e porta già la pagina
-                    final, page = amz_get(l.rstrip(".,;:!?"))
-                except Exception as e:  # noqa: BLE001
-                    log("link non aperto:", l, e)
-                    final, page = None, None
                 try:
-                    link = affilia(l, final)
+                    link, page = leggi_amazon(l)
                 except Exception as e:  # noqa: BLE001
                     log("link non affiliato:", l, e)
                     send_text(f"⚠️ Non riesco ad aprire questo link, riprova tra poco:\n{html.escape(l)}")
                     continue
                 try:
-                    info = amazon_info(link, page if final and ASIN_RE.search(urllib.parse.urlparse(final).path) else None)
+                    info = amazon_info(link, page)
                     if info:
                         tg("sendDocument", {"reply_to_message_id": m["message_id"]},
                            [("document", "amazon.png", render_amazon(info), "image/png")])
@@ -519,7 +662,8 @@ def handle_update(u):
                     send_text("Non riesco a leggere la pagina, ecco solo il link.")
                 send_text(f"<code>{html.escape(link)}</code>")
         elif text.startswith("/start"):
-            send_text("Mandami un link YouTube e ti preparo la storia, o un link Amazon e ti do quello affiliato.")
+            send_text("Mandami un link YouTube e ti preparo la storia, o un link Amazon e ti do quello affiliato.\n"
+                      "Con /storia e un link Amazon ti preparo la storia dell'offerta.")
         else:
             send_text("Non vedo un link YouTube o Amazon in questo messaggio.")
         return

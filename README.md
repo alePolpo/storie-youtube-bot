@@ -7,6 +7,12 @@ Bot Telegram. Gli mandi:
   card con gli angoli trasparenti;
 - un link Amazon: risponde con il link affiliato pulito (`/dp/ASIN?tag=...`).
 
+- `/storia` e un link Amazon: risponde con la storia 1080x1920 dell'offerta (etichetta in alto,
+  card con foto, nome, prezzo scontato e prezzo pieno barrato) e il link affiliato. Sotto il link
+  si possono cambiare i campi, uno per riga: `nome:`, `prezzo:`, `prima:`, `etichetta:`, `nota:`.
+  Il font è Gotham, che non sta nel repo: il bot lo prende da `~/Library/Fonts` o da `AMZ_PROXY`,
+  altrimenti usa Inter.
+
 ## Configurazione
 
 `.env` (vedi `.env.example`):
